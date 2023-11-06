@@ -1,6 +1,6 @@
 import * as cbor from 'cbor-web';
 
-export const isJsonObject = (string: Record<any, any>) => {
+const isJsonObject = (string: Record<any, any>) => {
 	try {
 		JSON.stringify(string);
 	} catch (e) {
@@ -8,6 +8,7 @@ export const isJsonObject = (string: Record<any, any>) => {
 	}
 	return true;
 };
+
 export const encodeSocketProtocol = (
 	actionName: string,
 	data?: string | Record<string, any> | ArrayBuffer,
@@ -63,31 +64,9 @@ export const encodeSocketProtocol = (
 		const int8Data = new Int8Array(encodeCborData);
 		combinedView.set(int8Data, offset);
 	} else if (metaData.type === 'binary') {
-		const int8Data = new Int8Array(data as Buffer);
+		const int8Data = new Int8Array(data as ArrayBuffer);
 		combinedView.set(int8Data, offset);
 	}
 
 	return combinedView;
-};
-
-export const decodeSocketProtocol = (arrayBuffer: ArrayBuffer) => {
-	const buffer = new Uint8Array(arrayBuffer);
-	const PROPERTIES_OFFSET = 2;
-
-	const length = (buffer[0] << 8) | buffer[1];
-	const propertiesBuffer = buffer.slice(PROPERTIES_OFFSET, length + PROPERTIES_OFFSET);
-	const properties = cbor.decode(propertiesBuffer, { encoding: 'utf-8' });
-	const dataBuffer = buffer.slice(PROPERTIES_OFFSET + length);
-
-	let resultData: Uint8Array | Record<string, any> | string | null = dataBuffer.length
-		? dataBuffer
-		: null;
-
-	if (!resultData) return { data: null, properties };
-
-	if (properties.type && ['text', 'json'].includes(properties.type)) {
-		resultData = cbor.decode(dataBuffer, { encoding: 'utf-8' });
-	}
-
-	return { data: resultData, properties };
 };

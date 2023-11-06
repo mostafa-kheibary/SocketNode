@@ -1,216 +1,145 @@
 import { IncomingMessage } from "http";
 import { WebSocket, WebSocketServer, Server, RawData } from "ws";
-import {
-  Connection,
-  EmitActionData,
-  MetaData,
-  SocketConnection,
-  SocketOption,
-} from "./SocketServer";
-import { Router } from "./EventRouter";
+import { EmitActionData, Req, SocketConnection, SocketOption } from "./SocketServer";
+import { Router } from "./Router";
 import internal from "stream";
-import { decodeSocketProtocol, encodeSocketProtocol } from "./sockets";
-import { logger } from "./logger";
+import { decodeSocketProtocol } from "./Protocol/decode";
+import { encodeSocketProtocol } from "./Protocol/encode";
+import { queryParamsParser } from "./utils/queryParamsParser";
 
-export class SocketServer {
+export class SocketServer extends Router {
   ws: Server;
-  authenticate: SocketOption["authenticate"];
-  path: SocketOption["path"];
-  router: Router = new Router();
-  connections: Map<string, Connection[]> = new Map();
-  rooms: Map<string, string[]> = new Map();
-  usersRoomMap: Map<string, string[]> = new Map();
+  private _connections: Map<string, SocketConnection> = new Map();
+  private _rooms: Map<string, string[]> = new Map();
+  private _usersRoomMap: Map<string, string[]> = new Map();
 
-  constructor(options: SocketOption) {
-    this.router = options.router;
-    this.authenticate = options.authenticate;
-    this.path = options.path;
+  constructor(private options: SocketOption) {
+    super();
     this.ws = new WebSocketServer({
       noServer: true,
-      path: options.path,
+      path: this.options.path,
       perMessageDeflate: false,
       handleProtocols: (protocols) => {
-        if (protocols.has("yapot")) {
-          return "yapot";
+        if (protocols.has("binary")) {
+          return "binary";
         }
         return false; // No suitable subprotocol found
       },
     });
-    options.server.on("upgrade", (r, s, h) => this.onUpgrade(r, s, h));
-    this.ws.on("connection", (c: any, _: any, m: any) =>
-      this.onConnection(c, m)
-    );
+    this.options.server.on("upgrade", (r, s, h) => this.onUpgrade(r, s, h));
+    this.ws.on("connection", (connection: any, req: any) => this.onConnection(connection, req));
   }
 
-  private async onUpgrade(
-    request: IncomingMessage,
-    socket: internal.Duplex,
-    head: Buffer
-  ) {
-    if (request.headers["sec-websocket-protocol"] !== "yapot") {
-      socket.write(
-        "HTTP/1.1 400 Bad Request\r\n\r\nUnsupported WebSocket subprotocol. Expected 'yapot'.",
-        () => {
-          socket.destroy();
-        }
-      );
-
-      return logger.warn(`Unsupported WebSocket subprotocol. Expected 'yapot'`);
-    }
-    const token = request.url?.split("?")[1] as string;
-
-    if (!this.authenticate) {
-      socket.write(
-        "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n",
-        () => {
-          socket.destroy();
-        }
-      );
-      return logger.warn(`401 Unauthorized,${token}`);
-    }
-    let user: any;
-    const sid = crypto.randomUUID();
-
-    try {
-      user = await this.authenticate(token);
-      const metaData: MetaData = { sid, user };
-
-      this.ws.handleUpgrade(request, socket, head, (ws) => {
-        this.ws.emit("connection", ws, request, metaData);
+  private async onUpgrade(request: IncomingMessage, socket: internal.Duplex, head: Buffer) {
+    if (request.headers["sec-websocket-protocol"] !== "binary") {
+      socket.write("HTTP/1.1 400 Bad Request\r\n\r\nUnsupported WebSocket subprotocol. Expected 'binary'.", () => {
+        socket.destroy();
       });
-    } catch (err) {
-      const error = err as { error: string; code: number };
-      socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
-      socket.destroy();
-      return logger.warn(
-        error?.code || 4001,
-        error?.error || "unexpected Auth error"
-      );
     }
+    const parameters = queryParamsParser(request.url as any);
+    const clientId = crypto.randomUUID();
+    const req: Req = { clientId, parameters };
+    if (!this.options.handleUpgrade) {
+      this.ws.handleUpgrade(request, socket, head, (ws) => {
+        this.ws.emit("connection", ws, req);
+      });
+      return;
+    }
+    this.options.handleUpgrade(socket, req, () => {
+      this.ws.handleUpgrade(request, socket, head, (ws) => {
+        this.ws.emit("connection", ws, req);
+      });
+    });
   }
   // action sender
-  private emitAction({ data, meta, properties }: EmitActionData) {
-    const client = (this.connections.get(meta.user.id) || []).find(
-      (cn) => cn.sid === meta.sid
-    );
-    if (!client || !client.connection) return;
-
-    this.router.emitRouter(
-      properties.route,
-      { ...client, connections: this.connections },
-      { data, properties }
-    );
+  private emitRouter({ data, req, properties }: EmitActionData) {
+    const client = this._connections.get(req.clientId);
+    if (!client) return;
+    this.emit(properties.route, { connection: client, connections: this._connections, req }, { data, properties });
   }
-  private sendAction(action: string, data: any, meta: MetaData) {
+  private sendAction(action: string, data: any, req: Req) {
     return new Promise<void>((res) => {
-      const client = (this.connections.get(meta.user.id) || []).find(
-        (cn) => cn.sid === meta.sid
-      );
-      if (!client || client.connection.readyState !== WebSocket.OPEN) return;
+      const client = this._connections.get(req.clientId);
+      if (!client || client.readyState !== WebSocket.OPEN) return;
 
       const binary = encodeSocketProtocol(action, data);
-      client.connection.send(binary, (err) => {
-        if (err) {
-          logger.error(err);
-        }
-        logger.info(`action send, id=${meta.user.id} action=${action}`);
-        res();
-      });
+      client.send(binary, () => res());
     });
   }
-  private sessionBroadcast(action: string, data: any, meta: MetaData) {
-    const client = (this.connections.get(meta.user.id) || []).filter(
-      (cn) => cn.sid !== meta.sid
-    );
-    client.forEach((cn) => {
-      cn.connection.sendAction(action, data);
-    });
-  }
-  private join(room: string, meta: MetaData) {
-    const rooms = this.rooms.get(room) || [];
-    const userMapRoom = this.usersRoomMap.get(meta.user.id) || [];
+  // private sessionBroadcast(action: string, data: any, req: Req) {
+  //   const client = (this._connections.get(meta.user.id) || []).filter((cn) => cn.sid !== meta.sid);
+  //   client.forEach((cn) => {
+  //     cn.connection.sendAction(action, data);
+  //   });
+  // }
+  private join(room: string, req: Req) {
+    const rooms = this._rooms.get(room) || [];
+    const userMapRoom = this._usersRoomMap.get(req.clientId) || [];
 
-    if (!rooms.find((clientId) => clientId === meta.user.id)) {
-      this.rooms.set(room, [...rooms, meta.user.id]);
+    if (!rooms.find((clientId) => clientId === req.clientId)) {
+      this._rooms.set(room, [...rooms, req.clientId]);
     }
     if (!userMapRoom.find((cRoom) => cRoom === room)) {
-      this.usersRoomMap.set(meta.user.id, [...userMapRoom, room]);
+      this._usersRoomMap.set(req.clientId, [...userMapRoom, room]);
     }
-    logger.info(`User id=${meta.user.id} Join ${room}`);
   }
-  private left(room: string, meta: MetaData) {
-    const prevUsers = this.rooms.get(room) || [];
-    const prevRooms = this.usersRoomMap.get(meta.user.id) || [];
+  private left(room: string, req: Req) {
+    const prevUsers = this._rooms.get(room) || [];
+    const prevRooms = this._usersRoomMap.get(req.clientId) || [];
 
     const restPrevRooms = prevRooms.filter((cRoom) => cRoom !== room);
-    const restUsersRoom = prevUsers.filter(
-      (clientId) => clientId !== meta.user.id
-    );
+    const restUsersRoom = prevUsers.filter((clientId) => clientId !== req.clientId);
 
-    this.rooms.set(room, restUsersRoom);
-    this.usersRoomMap.set(meta.user.id, restPrevRooms);
+    this._rooms.set(room, restUsersRoom);
+    this._usersRoomMap.set(req.clientId, restPrevRooms);
 
     if (!restPrevRooms.length) {
-      this.usersRoomMap.delete(meta.user.id);
+      this._usersRoomMap.delete(req.clientId);
     }
     if (!restUsersRoom.length) {
-      this.rooms.delete(room);
+      this._rooms.delete(room);
     }
-
-    logger.info(`User id=${meta.user.id} Left ${room}`);
   }
   // TODO: refactor this !!!
-  private roomBroadcast(action: string, data: any, meta: MetaData) {
-    const rooms = this.usersRoomMap.get(meta.user.id) || [];
+  private roomBroadcast(action: string, data: any, req: Req) {
+    const rooms = this._usersRoomMap.get(req.clientId) || [];
     rooms.forEach((room) => {
-      const clients = this.rooms.get(room) || [];
+      const clients = this._rooms.get(room) || [];
       clients.forEach((clientId) => {
-        const sessions = this.connections.get(clientId) || [];
-        sessions.forEach((session) => {
-          session.connection.sendAction(action, data);
-        });
+        const client = this._connections.get(clientId);
+        // refactor,error handling
+        if (!client) return;
+        client.sendAction(action, data);
       });
     });
   }
-  private onClose(metaData: MetaData) {
-    const client = this.connections.get(metaData.user.id) || [];
-    const restClient = client?.filter((cn) => cn.sid !== metaData.sid);
-
-    if (!restClient.length) {
-      this.connections.delete(metaData.user.id);
-    } else {
-      this.connections.set(metaData.user.id, restClient);
-    }
-  }
-  private onConnection(connection: SocketConnection, meta: MetaData) {
-    connection.prependListener("close", () => connection.removeAllListeners());
-    connection.sendAction = (action: string, data: any) =>
-      this.sendAction(action, data, meta);
-    connection.sessionBroadcast = (action: string, data: any) =>
-      this.sessionBroadcast(action, data, meta);
-    connection.roomBroadcast = (action: string, data: any) =>
-      this.roomBroadcast(action, data, meta);
-    connection.join = (room: string) => this.join(room, meta);
-    connection.left = (room: string) => this.left(room, meta);
+  private onConnection(connection: SocketConnection, req: Req) {
+    connection.sendAction = (action: string, data: any) => this.sendAction(action, data, req);
+    connection.roomBroadcast = (action: string, data: any) => this.roomBroadcast(action, data, req);
+    connection.join = (room: string) => this.join(room, req);
+    connection.left = (room: string) => this.left(room, req);
+    // connection.sessionBroadcast = (action: string, data: any) => this.sessionBroadcast(action, data, req);
 
     connection.binaryType = "arraybuffer";
-    const prevConnections = this.connections.get(meta.user.id) || [];
-    this.connections.set(meta.user.id, [
-      ...prevConnections,
-      { sid: meta.sid, user: meta.user, connection, producers: {} },
-    ]);
+    const sameConnection = this._connections.has(req.clientId);
+    // refactor this shiiiit.
+    if (sameConnection) {
+      console.log("same client id,client exist");
+      return connection.close();
+    }
+    this._connections.set(req.clientId, connection);
 
-    this.emitAction({ data: null, meta, properties: { route: "connection" } });
+    this.emitRouter({ data: null, req, properties: { route: "connection" } });
 
     connection.prependListener("close", () => {
-      this.emitAction({ data: null, meta, properties: { route: "close" } });
+      this.emitRouter({ data: null, req, properties: { route: "close" } });
+      connection.removeAllListeners();
     });
-    connection.on("close", () => this.onClose(meta));
-    connection.on("message", (rawData) => this.onMessage(rawData, meta));
+    connection.on("close", () => this._connections.delete(req.clientId));
+    connection.on("message", (rawData) => this.onMessage(rawData, req));
   }
-  onMessage(rawData: RawData, meta: MetaData) {
+  onMessage(rawData: RawData, req: Req) {
     const { data, properties } = decodeSocketProtocol(rawData as ArrayBuffer);
-    console.log(data);
-    this.emitAction({ data, meta, properties });
+    this.emitRouter({ data, req, properties });
   }
 }
