@@ -1,5 +1,6 @@
 import { EventEmitter } from "events";
-import { ActionEventName, ActionRoute, MiddleWare, SocketData } from "../SocketServer";
+import { Client, MiddleWare, Payload, Route } from "../index.d";
+import { WebsocketResponse } from "../types/SocketServer";
 
 export class Router extends EventEmitter {
   routes: Map<string, Router> = new Map();
@@ -16,7 +17,7 @@ export class Router extends EventEmitter {
     this.routes.set(key, child);
   }
 
-  public emit(eventName: string, ...args: any[]): boolean {
+  public emit(eventName: string, client: Client, payload: Payload<any, any>): boolean {
     eventName = eventName.startsWith("/") ? eventName.replace("/", "") : eventName;
 
     const indexOfSlash = eventName.indexOf("/");
@@ -25,19 +26,19 @@ export class Router extends EventEmitter {
       const childEventName = eventName.substring(indexOfSlash + 1);
 
       if (this.routes.has("")) {
-        return this.routes.get("")!.emit(eventName, ...args);
+        return this.routes.get("")!.emit(eventName, client, payload);
       }
       if (this.routes.has(nextPrefix)) {
-        return this.routes.get(nextPrefix)!.emit(childEventName, ...args);
+        return this.routes.get(nextPrefix)!.emit(childEventName, client, payload);
       }
     }
-    return super.emit(eventName, ...args);
+    return super.emit(eventName, client, payload);
   }
-  on<T = SocketData, F extends Record<string, string> | undefined = Record<string, string> | undefined>(
-    event: ActionEventName,
+  on<T = WebsocketResponse, F extends Record<string, string> | undefined = Record<string, string> | undefined>(
+    event: string,
     ...middleWare: MiddleWare<T, F>[]
   ): this {
-    const innerListener: ActionRoute<T, F> = (client, payload) => {
+    const innerListener: Route<T, F> = (client, payload) => {
       let index = 0;
       const next = () => {
         index++;
@@ -50,34 +51,28 @@ export class Router extends EventEmitter {
     }
     return super.on(event, innerListener);
   }
-  once<T = SocketData, F extends Record<string, string> | undefined = Record<string, string> | undefined>(
-    event: ActionEventName,
-    listener: ActionRoute<T, F>
+  once<T = WebsocketResponse, F extends Record<string, string> | undefined = Record<string, string> | undefined>(
+    event: string,
+    listener: Route<T, F>
   ): this {
     return super.once(event, listener);
   }
-  prependListener<T = SocketData, F extends Record<string, string> | undefined = Record<string, string> | undefined>(
-    event: ActionEventName,
-    listener: ActionRoute<T, F>
-  ): this {
+  prependListener<
+    T = WebsocketResponse,
+    F extends Record<string, string> | undefined = Record<string, string> | undefined
+  >(event: string, listener: Route<T, F>): this {
     return super.prependListener(event, listener);
   }
   prependOnceListener<
-    T = SocketData,
+    T = WebsocketResponse,
     F extends Record<string, string> | undefined = Record<string, string> | undefined
-  >(event: ActionEventName, listener: ActionRoute<T, F>): this {
+  >(event: string, listener: Route<T, F>): this {
     return super.prependOnceListener(event, listener);
   }
-  off<T = SocketData, F extends Record<string, string> | undefined = Record<string, string> | undefined>(
-    event: ActionEventName,
-    listener: ActionRoute<T, F>
-  ): this {
+  off(event: string, listener: (...args: any[]) => void): this {
     return super.off(event, listener);
   }
-  removeListener<T = SocketData, F extends Record<string, string> | undefined = Record<string, string> | undefined>(
-    event: ActionEventName,
-    listener: ActionRoute<T, F>
-  ): this {
+  removeListener(event: string, listener: (...args: any[]) => void): this {
     return super.removeListener(event, listener);
   }
 }

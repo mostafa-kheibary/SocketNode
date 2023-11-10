@@ -1,21 +1,22 @@
 import { IncomingMessage } from "http";
-import { WebSocket, WebSocketServer, Server, RawData } from "ws";
-import { EmitActionData, Req, SocketConnection, SocketOption } from "./SocketServer";
+import { WebSocket, WebSocketServer as WsServer, Server, RawData } from "ws";
+import { WebSocketConnection, WebsocketOptions } from "./types/SocketServer";
+import { Req } from "./index.d";
 import { Router } from "./Router";
 import internal from "stream";
 import { decodeSocketProtocol } from "./Protocol/decode";
 import { encodeSocketProtocol } from "./Protocol/encode";
 import { queryParamsParser } from "./utils/queryParamsParser";
 
-export class SocketServer extends Router {
+export class WebSocketServer extends Router {
   ws: Server;
-  private _connections: Map<string, SocketConnection> = new Map();
+  connections: Map<string, WebSocketConnection> = new Map();
   private _rooms: Map<string, string[]> = new Map();
   private _usersRoomMap: Map<string, string[]> = new Map();
 
-  constructor(private options: SocketOption) {
+  constructor(private options: WebsocketOptions) {
     super();
-    this.ws = new WebSocketServer({
+    this.ws = new WsServer({
       noServer: true,
       path: this.options.path,
       perMessageDeflate: false,
@@ -23,7 +24,7 @@ export class SocketServer extends Router {
         if (protocols.has("binary")) {
           return "binary";
         }
-        return false; // No suitable subprotocol found
+        return false;
       },
     });
     this.options.server.on("upgrade", (r, s, h) => this.onUpgrade(r, s, h));
@@ -51,27 +52,15 @@ export class SocketServer extends Router {
       });
     });
   }
-  // action sender
-  private emitRouter({ data, req, properties }: EmitActionData) {
-    const client = this._connections.get(req.clientId);
-    if (!client) return;
-    this.emit(properties.route, { connection: client, connections: this._connections, req }, { data, properties });
-  }
   private sendAction(action: string, data: any, req: Req) {
     return new Promise<void>((res) => {
-      const client = this._connections.get(req.clientId);
+      const client = this.connections.get(req.clientId);
       if (!client || client.readyState !== WebSocket.OPEN) return;
 
       const binary = encodeSocketProtocol(action, data);
       client.send(binary, () => res());
     });
   }
-  // private sessionBroadcast(action: string, data: any, req: Req) {
-  //   const client = (this._connections.get(meta.user.id) || []).filter((cn) => cn.sid !== meta.sid);
-  //   client.forEach((cn) => {
-  //     cn.connection.sendAction(action, data);
-  //   });
-  // }
   private join(room: string, req: Req) {
     const rooms = this._rooms.get(room) || [];
     const userMapRoom = this._usersRoomMap.get(req.clientId) || [];
@@ -101,45 +90,43 @@ export class SocketServer extends Router {
     }
   }
   // TODO: refactor this !!!
-  private roomBroadcast(action: string, data: any, req: Req) {
+  private roomBroadcast(route: string, data: any, req: Req) {
     const rooms = this._usersRoomMap.get(req.clientId) || [];
     rooms.forEach((room) => {
       const clients = this._rooms.get(room) || [];
       clients.forEach((clientId) => {
-        const client = this._connections.get(clientId);
-        // refactor,error handling
+        const client = this.connections.get(clientId);
         if (!client) return;
-        client.sendAction(action, data);
+        client.sendAction(route, data);
       });
     });
   }
-  private onConnection(connection: SocketConnection, req: Req) {
+  private onConnection(connection: WebSocketConnection, req: Req) {
     connection.sendAction = (action: string, data: any) => this.sendAction(action, data, req);
     connection.roomBroadcast = (action: string, data: any) => this.roomBroadcast(action, data, req);
     connection.join = (room: string) => this.join(room, req);
     connection.left = (room: string) => this.left(room, req);
-    // connection.sessionBroadcast = (action: string, data: any) => this.sessionBroadcast(action, data, req);
 
     connection.binaryType = "arraybuffer";
-    const sameConnection = this._connections.has(req.clientId);
-    // refactor this shiiiit.
+    const sameConnection = this.connections.has(req.clientId);
     if (sameConnection) {
-      console.log("same client id,client exist");
       return connection.close();
     }
-    this._connections.set(req.clientId, connection);
+    this.connections.set(req.clientId, connection);
 
-    this.emitRouter({ data: null, req, properties: { route: "connection" } });
-
+    this.emit("connection", { ws: connection, req }, { data: null, properties: {} });
     connection.prependListener("close", () => {
-      this.emitRouter({ data: null, req, properties: { route: "close" } });
+      this.emit("close", { ws: connection, req }, { data: null, properties: {} });
       connection.removeAllListeners();
     });
-    connection.on("close", () => this._connections.delete(req.clientId));
+    connection.on("close", () => this.connections.delete(req.clientId));
     connection.on("message", (rawData) => this.onMessage(rawData, req));
   }
   onMessage(rawData: RawData, req: Req) {
+    const client = this.connections.get(req.clientId);
+    if (!client) return;
+
     const { data, properties } = decodeSocketProtocol(rawData as ArrayBuffer);
-    this.emitRouter({ data, req, properties });
+    this.emit(properties.route, { ws: client, req }, { data, properties });
   }
 }

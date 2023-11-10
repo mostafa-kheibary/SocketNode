@@ -1,19 +1,20 @@
 import router from "./routes/router";
-import { SocketServer } from "./sockets";
+import { WebSocketServer } from "./sockets";
 import http from "http";
 
 const server = http.createServer();
 
-const wss = new SocketServer({
+export const app = new WebSocketServer({
   server,
-  handleUpgrade: (connection, req, next) => {
+  handleUpgrade: (socket, req, next) => {
     req.user = "lol";
     next();
   },
 });
 
-wss.add(router);
-wss.on("connection", () => {
+app.add(router);
+
+app.on("connection", () => {
   console.log("lets goooooo");
 });
 server.listen(3200);

@@ -20,12 +20,9 @@
 		app.on('connection', ({ data }) => {
 			console.log(data);
 		});
-		app.on<string>('hi', (data) => {
-			console.log(data);
-		});
 	});
 	const handleClick = () => {
-		app.send('/public/test');
+		app.send('/auth/admin');
 	};
 </script>
 
