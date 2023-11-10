@@ -1,3 +1,4 @@
+import { WebSocketConnection } from "./Server/Connection";
 import type { WebsocketResponse, WebSocketProperties } from "./types/SocketServer";
 
 export interface Req {
