@@ -13,10 +13,3 @@ export interface WebsocketOptions {
   server: Server;
   handleUpgrade?: (socket: internal.Duplex, req: Req, next: () => void) => void;
 }
-export interface WebSocketConnection extends WebSocket {
-  sendAction: (action: string, data: any) => void;
-  sessionBroadcast: (action: string, data: any) => void;
-  roomBroadcast: (action: string, data: any) => void;
-  join: (room: string) => void;
-  left: (room: string) => void;
-}
